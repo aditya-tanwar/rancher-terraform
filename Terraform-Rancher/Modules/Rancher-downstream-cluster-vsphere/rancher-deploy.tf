@@ -1,33 +1,33 @@
 
-// Fetching the vsphere credential metadata from the rancher using the data module. 
+
+// Fetching the vsphere credential metadata from the rancher
 
 data "rancher2_cloud_credential" "auth" {
   name = var.cloud_credential
 }
 
 
-// Creating a cluster using the node pools 
+ // Creating a cluster using the node pools
 
 resource "rancher2_cluster_v2" "foo-rke2" {
   name                                     = var.cluster_name
-  kubernetes_version                       = var.kubernetes_version
+  kubernetes_version                       = var.kubernetes_version # which kubernetes version is to be deployed
   enable_network_policy                    = var.enable_network_policy
   default_cluster_role_for_project_members = var.default_cluster_role_for_project_members
 
 // This is section for configuring the authorized endpoint ( ACE )
 
   local_auth_endpoint {
-    ca_certs = file("./test.pem", )
+    ca_certs = file("../../../Modules/Rancher_Downstream_cluster/test.pem", )
     enabled  = true
-    fqdn     = "rancher.rancherlab02.rancher.prgx.com:6443"
+    fqdn     = "prgx-dev.non-prod.rancher.prgx.com:6443"
   }
 
 // This section below defines the lifecycle of the authorized endpoint ( ACE ) & cloud_credential_secret_name to protect the drifting of its configuration
-  
-  lifecycle {
-    ignore_changes = [local_auth_endpoint, cloud_credential_secret_name] 
-  }
 
+  lifecycle {
+      ignore_changes = [local_auth_endpoint, cloud_credential_secret_name]
+     }
   rke_config {
 
     // Creating the machine global config in the rke_config block 
@@ -36,26 +36,25 @@ resource "rancher2_cluster_v2" "foo-rke2" {
       cni: ${var.cni}
       disable-kube-proxy: false
       etcd-expose-metrics: false
-    
-    // The below setting allows a node to be able to schedule 250 pods 
-    
       kubelet-arg:
         - max-pods=250
     EOF
-
-    // This section is for etcd backups scheduling using cron jobs  
     
+    // The above setting allows a node to be able to schedule 250 pods 
+
+    // This section is for etcd backups scheduling using cron jobs
+
     etcd {
-      snapshot_schedule_cron = "0 */24 * * *"   // cron format
+      snapshot_schedule_cron = "0 */24 * * *"
       snapshot_retention = 5
     }
 
-// Creating dynamic machine pools 
+    // creating dynamic machine pools
 
     dynamic "machine_pools" {
       for_each = var.node
       content {
-        cloud_credential_secret_name = data.rancher2_cloud_credential.auth.id
+        cloud_credential_secret_name = data.rancher2_cloud_credential.auth.id  # "cattle-global-data:cc-bn26l"  
         control_plane_role           = machine_pools.key == "ctl_plane" ? true : false
         etcd_role                    = machine_pools.key == "ctl_plane" ? true : false
         name                         = machine_pools.value.name
@@ -64,7 +63,7 @@ resource "rancher2_cluster_v2" "foo-rke2" {
         machine_labels  = (machine_pools.key == "storage") || (machine_pools.key == "ingress")  ? "${lookup(var.labels, machine_pools.key, )}" : null
         dynamic "taints"{ // Adding the taints dynamically to the nodes ( ingress / storage ) 
           for_each = (machine_pools.key == "storage") || (machine_pools.key == "ingress") ?  [1] : []
-          content {
+          content { 
                 key = "dedicated"
                 value = machine_pools.value.name
                 effect = "NoSchedule"
@@ -74,8 +73,33 @@ resource "rancher2_cluster_v2" "foo-rke2" {
           kind = rancher2_machine_config_v2.machineconfig[machine_pools.key].kind
           name = replace(rancher2_machine_config_v2.machineconfig[machine_pools.key].name, "_", "-")
         }
-      } // End of dynamic for_each content
-    }   // End of machine_pools
+      } # End of dynamic for_each content
+
+      
+    }   # End of machine_pools
+
+  // This is the upgrade strategy for the master and worker nodes to protect the recreation of the nodes during the update activity
+
+  upgrade_strategy {
+    control_plane_drain_options {
+      delete_empty_dir_data = true
+      disable_eviction = false
+      enabled = true
+      force = true
+      grace_period = 20
+      skip_wait_for_delete_timeout_seconds = 0
+      timeout = 0
+    }
+    worker_drain_options {
+      delete_empty_dir_data = true
+      disable_eviction = false
+      enabled = true
+      force = true
+      grace_period = 20
+      skip_wait_for_delete_timeout_seconds = 0
+      timeout = 0
+    }
+  }
   }
 }
 
@@ -90,7 +114,8 @@ output "extracted_content" {
 }
 
 
-// Creating a machine config to be used while creating the cluster
+
+// creating a machine config to be used while creating the cluster
 
 resource "rancher2_machine_config_v2" "machineconfig" {
   for_each      = var.node
@@ -99,7 +124,7 @@ resource "rancher2_machine_config_v2" "machineconfig" {
   vsphere_config {
     cfgparam      = ["disk.enableUUID=TRUE"] // Disk UUID is Required for vSphere Storage Provider ( mandatory for the cluster to work )
     clone_from    = var.vsphere_env.cloud_image_name
-    cloud_config  = file("/root/aditya/Modules/lab_rancher/cloud.yaml", ) // This is basically the path where the cloud.yaml is stored 
+    cloud_config  = file("../../../Modules/Rancher_Downstream_cluster/cloud.yaml", ) // This is basically the path where the cloud.yaml is stored 
     cpu_count     = each.value.cpu
     creation_type = "template"
     datacenter    = var.vsphere_env.datacenter
@@ -121,12 +146,14 @@ resource "rancher2_machine_config_v2" "machineconfig" {
       "guestinfo.dns.servers=$${dns:${local.filter_out}}"
     ]
     vapp_transport = "com.vmware.guestInfo"
+    
   }
 
-  // This is a lifecycle management to prevent automatic drifts in the cloud_config ( LINE 104 ) 
+// This is a lifecycle management to prevent automatic drifts in the cloud_config in vsphere_config in the "rancher2_machine_config_v2"
+
   lifecycle {
     ignore_changes = [
         vsphere_config[0].cloud_config,
     ]
- }
+  }
 }
